@@ -110,32 +110,42 @@ func processFile(dstPath string, dbh *leveldb.DB, processingCh <-chan *fileEntry
 	}
 }
 
+func hashFile(path string) (csum []byte, err error) {
+	var file *os.File
+	hash := sha256.New()
+
+	if file, err = os.Open(path); err != nil {
+		return
+	} else {
+		// ignoring possible error in Close() on purpose; failed close on
+		// O_RDONLY fd is not fatal (until file descriptors are consumed)
+		defer file.Close()
+
+		if _, err = io.Copy(hash, file); err != nil {
+			return
+		} else {
+			csum = hash.Sum([]byte{})
+		}
+	}
+
+	return
+}
+
 func hashFiles(hashingCh <-chan *fileEntry, processingCh chan<- *fileEntry) {
 	defer close(processingCh)
 
 	var fent *fileEntry
+	var err error
 	more := true
-	hash := sha256.New()
 
 	for more {
 		select {
 		case fent, more = <-hashingCh:
 			if more {
-				if file, err := os.Open(fent.path); err != nil {
-					fmt.Printf("Cannot open %s for reading. Skipping.\n", fent.path)
-					continue
+				if fent.csum, err = hashFile(fent.path); err != nil {
+					fmt.Printf("error: Couldn't calculate checksum for file %s: %s\n", fent.path, err)
 				} else {
-					hash.Reset()
-
-					if _, err = io.Copy(hash, file); err != nil {
-						fmt.Printf("error: Unable to read %s: %s. Skipping.\n", fent.path, err, fent.path)
-					} else {
-						fent.csum = hash.Sum([]byte{})
-						processingCh <- fent
-					}
-
-					// ignoring err on purpose; nothing to do with it at this point
-					file.Close()
+					processingCh <- fent
 				}
 			}
 		}
