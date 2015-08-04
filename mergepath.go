@@ -44,8 +44,6 @@ func Copy(src, dst string) (err error) {
 
 	// create a new file and ensure it doesn't exist (O_EXCL)
 	if dstFd, err = os.OpenFile(dst, (os.O_WRONLY | os.O_CREATE | os.O_EXCL), 0640); err != nil {
-		// TODO: If OpenFile fails due to os.IsExists() one could compare
-		//		 destination file checksum to fent.csum.
 		return
 	}
 
@@ -78,13 +76,18 @@ func processFile(dstPath string, dbh *leveldb.DB, processingCh <-chan *fileEntry
 			if more {
 				newPath := filepath.Join(dstPath, fent.path)
 
-				// TODO: Check whether the file already exists in destination
 				if _, err := dbh.Get(fent.csum, nil); err == db.ErrNotFound {
-					// File not processed yet
+					// file not processed yet
 					if move {
 						DEBUG("moving file %s to %s\n", fent.path, newPath)
+
+						if err = os.MkdirAll(filepath.Dir(newPath), (os.ModeDir | 0750)); err != nil {
+							fmt.Printf("%s\n", err)
+							continue
+						}
+
 						if err = os.Rename(fent.path, newPath); err != nil {
-							fmt.Printf("error: Couldn't move file %s to %s: %s\n", fent.path, newPath, err)
+							fmt.Printf("%s\n", err)
 							continue
 						}
 					} else {
