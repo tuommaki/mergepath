@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/golang/leveldb"
 	"github.com/golang/leveldb/db"
@@ -20,8 +21,9 @@ const (
 )
 
 type fileEntry struct {
-	path string
-	csum []byte
+	srcPath string
+	dstPath string
+	csum    []byte
 }
 
 type PrintfFunc func(string, ...interface{}) (int, error)
@@ -66,7 +68,7 @@ func Copy(src, dst string) (err error) {
 	return
 }
 
-func processFile(dstPath string, dbh *leveldb.DB, processingCh <-chan *fileEntry, move bool) {
+func processFile(dbh *leveldb.DB, processingCh <-chan *fileEntry, move bool) {
 	var fent *fileEntry
 	more := true
 
@@ -74,35 +76,37 @@ func processFile(dstPath string, dbh *leveldb.DB, processingCh <-chan *fileEntry
 		select {
 		case fent, more = <-processingCh:
 			if more {
-				newPath := filepath.Join(dstPath, fent.path)
 
 				if _, err := dbh.Get(fent.csum, nil); err == db.ErrNotFound {
 					// file not processed yet
 					if move {
-						DEBUG("moving file %s to %s\n", fent.path, newPath)
+						DEBUG("moving file %s to %s\n", fent.srcPath, fent.dstPath)
 
-						if err = os.MkdirAll(filepath.Dir(newPath), (os.ModeDir | 0750)); err != nil {
+						if err = os.MkdirAll(filepath.Dir(fent.dstPath), (os.ModeDir | 0750)); err != nil {
 							fmt.Printf("%s\n", err)
 							continue
 						}
 
-						if err = os.Rename(fent.path, newPath); err != nil {
-							fmt.Printf("%s\n", err)
-							continue
+						if err = os.Rename(fent.srcPath, fent.dstPath); err != nil {
+							fmt.Printf("error: renaming file %s to %s failed. trying to copy instead.\n", fent.srcPath, fent.dstPath)
+							if err = Copy(fent.srcPath, fent.dstPath); err != nil {
+								fmt.Printf("error: Couldn't copy file %s to %s: %s\n", fent.srcPath, fent.dstPath, err)
+								continue
+							}
 						}
 					} else {
-						DEBUG("copying file %s to %s\n", fent.path, newPath)
-						if err = Copy(fent.path, newPath); err != nil {
-							fmt.Printf("error: Couldn't copy file %s to %s: %s\n", fent.path, newPath, err)
+						DEBUG("copying file %s to %s\n", fent.srcPath, fent.dstPath)
+						if err = Copy(fent.srcPath, fent.dstPath); err != nil {
+							fmt.Printf("error: Couldn't copy file %s to %s: %s\n", fent.srcPath, fent.dstPath, err)
 							continue
 						}
 					}
 
-					dbh.Set(fent.csum, []byte(fent.path), nil)
+					dbh.Set(fent.csum, []byte(fent.srcPath), nil)
 				} else if err == nil {
-					DEBUG("skipping file %s since it already exists.\n", fent.path)
+					DEBUG("skipping file %s since it already exists.\n", fent.srcPath)
 				} else {
-					fmt.Printf("error: Unable to check whether %s exists: %s. Skipping.\n", fent.path, err)
+					fmt.Printf("error: Unable to check whether %s exists: %s. Skipping.\n", fent.srcPath, err)
 					continue
 				}
 			}
@@ -142,8 +146,8 @@ func hashFiles(hashingCh <-chan *fileEntry, processingCh chan<- *fileEntry) {
 		select {
 		case fent, more = <-hashingCh:
 			if more {
-				if fent.csum, err = hashFile(fent.path); err != nil {
-					fmt.Printf("error: Couldn't calculate checksum for file %s: %s\n", fent.path, err)
+				if fent.csum, err = hashFile(fent.srcPath); err != nil {
+					fmt.Printf("error: Couldn't calculate checksum for file %s: %s\n", fent.srcPath, err)
 				} else {
 					processingCh <- fent
 				}
@@ -158,10 +162,13 @@ func cleanupDbDir(dbDir string) {
 	}
 }
 
-func getPathProcessor(hashingCh chan<- *fileEntry) filepath.WalkFunc {
+func getPathProcessor(hashingCh chan<- *fileEntry, rootDir, dstDir string) filepath.WalkFunc {
 	return func(path string, info os.FileInfo, err error) error {
 		if !info.IsDir() {
-			hashingCh <- &fileEntry{path: path}
+			hashingCh <- &fileEntry{
+				srcPath: path,
+				dstPath: filepath.Join(dstDir, strings.SplitN(path, rootDir, 2)[1]),
+			}
 		}
 
 		return err
@@ -208,9 +215,9 @@ func main() {
 
 	// Go for it
 	go hashFiles(hashingCh, processingCh)
-	go processFile(flag.Args()[0], dbh, processingCh, moveFiles)
+	go processFile(dbh, processingCh, moveFiles)
 
 	for _, d := range flag.Args()[1:] {
-		filepath.Walk(d, getPathProcessor(hashingCh))
+		filepath.Walk(d, getPathProcessor(hashingCh, d, flag.Args()[0]))
 	}
 }
